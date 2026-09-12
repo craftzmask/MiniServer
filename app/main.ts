@@ -1,12 +1,12 @@
 import * as net from "net";
 import { readFileSync, existsSync, writeFileSync } from "fs";
 import {
-  parseRequest,
   sendResponse,
   sendNotFoundResponse,
   sendOKResponse,
   sendCreateResponse,
-} from "./helper";
+} from "./response";
+import { parseRequest } from "./request";
 
 const server = net.createServer((socket) => {
   socket.on("data", (data) => {

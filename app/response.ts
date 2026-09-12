@@ -1,10 +1,7 @@
-export interface HttpRequest {
-  method: string;
-  path: string;
-  version: string;
-  headers: Record<string, string>;
-  body?: string;
-}
+import * as net from "net";
+import type { HttpRequest } from "./request";
+
+const compressionSchemes = ["gzip"];
 
 export class HttpResponse {
   constructor(
@@ -120,3 +117,67 @@ class ResponseBuilder {
     );
   }
 }
+
+export const sendResponse = (
+  socket: net.Socket,
+  request: HttpRequest,
+  content: string | Buffer,
+  contentType: string = "text/plain",
+): void => {
+  try {
+    const contentEncoding = request.headers["accept-encoding"]?.split(", ");
+    const isCompressionSupported = contentEncoding?.some((encoding) =>
+      compressionSchemes.includes(encoding),
+    );
+    const isConnectionClose =
+      request.headers["connection"] &&
+      request.headers["connection"] === "close";
+
+    const response = HttpResponse.Builder.setContentType(
+      request.headers["content-type"]
+        ? request.headers["content-type"]
+        : contentType,
+    )
+      .setContentEncoding(isCompressionSupported ? "gzip" : "")
+      .setBody(
+        isCompressionSupported ? Bun.gzipSync(Buffer.from(content)) : content,
+      )
+      .setHeader("connection", isConnectionClose ? "close" : "open")
+      .build();
+
+    socket.write(response.toBuffer());
+  } catch {
+    sendBadRequestResponse(socket);
+  }
+};
+
+export const sendOKResponse = (socket: net.Socket) => {
+  socket.write(HttpResponse.Builder.build().toString());
+};
+
+export const sendNotFoundResponse = (socket: net.Socket) => {
+  socket.write(
+    HttpResponse.Builder.setStatusCode(404)
+      .setStatusMessage("Not Found")
+      .build()
+      .toString(),
+  );
+};
+
+export const sendCreateResponse = (socket: net.Socket) => {
+  socket.write(
+    HttpResponse.Builder.setStatusCode(201)
+      .setStatusMessage("Created")
+      .build()
+      .toString(),
+  );
+};
+
+export const sendBadRequestResponse = (socket: net.Socket) => {
+  socket.write(
+    HttpResponse.Builder.setStatusCode(400)
+      .setStatusMessage("Bad Request")
+      .build()
+      .toString(),
+  );
+};
