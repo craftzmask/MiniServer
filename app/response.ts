@@ -1,183 +1,117 @@
 import * as net from "net";
 import type { HttpRequest } from "./request";
 
-const compressionSchemes = ["gzip"];
+enum HttpStatus {
+  OK = 200,
+  CREATED = 201,
+  BAD_REQUEST = 400,
+  NOT_FOUND = 404,
+}
 
-export class HttpResponse {
-  constructor(
-    public version: string,
-    public statusCode: number,
-    public statusMessage: string,
-    public headers: Record<string, string | number>,
-    public body?: string | Buffer,
-  ) {}
+interface HttpResponse {
+  version: string;
+  status: HttpStatus;
+  headers: Record<string, string>;
+  body: Uint8Array<ArrayBufferLike>;
+}
 
-  static get Builder() {
-    return new ResponseBuilder();
-  }
-
-  toString(): string {
-    const lines = [`${this.version} ${this.statusCode} ${this.statusMessage}`];
-    Object.entries(this.headers).forEach((header) =>
-      lines.push(`${header[0]}: ${header[1]}`),
-    );
-
-    // Mark to end of headers
-    lines.push("");
-
-    if (this.body) {
-      lines.push(`${this.body}`);
-    } else {
-      lines.push("");
-    }
-
-    return lines.join("\r\n");
-  }
-
-  toBuffer(): Buffer {
-    const lines = [`${this.version} ${this.statusCode} ${this.statusMessage}`];
-    Object.entries(this.headers).forEach((header) =>
-      lines.push(`${header[0]}: ${header[1]}`),
-    );
-
-    if (this.body) {
-      lines.push("");
-      lines.push("");
-
-      return Buffer.concat([
-        Buffer.from(lines.join("\r\n")),
-        Buffer.from(this.body),
-      ]);
-    }
-
-    return Buffer.from(lines.join("\r\n"));
+function reasonPhrase(status: HttpStatus): string {
+  switch (status) {
+    case HttpStatus.OK:
+      return "OK";
+    case HttpStatus.CREATED:
+      return "Created";
+    case HttpStatus.BAD_REQUEST:
+      return "Bad Request";
+    case HttpStatus.NOT_FOUND:
+      return "Not Found";
+    default:
+      return "Unknown";
   }
 }
 
-class ResponseBuilder {
-  private version = "HTTP/1.1";
-  private statusCode = 200;
-  private statusMessage = "OK";
-  private headers: Record<string, string | number> = {};
-  private body?: string | Buffer;
+function toBuffer(response: HttpResponse): Buffer {
+  const statusLine = `${response.version} ${response.status} ${reasonPhrase(response.status)}\r\n`;
 
-  setVersion(version: string): this {
-    this.version = version;
-    return this;
+  const headers = [];
+  for (const [key, value] of Object.entries(response.headers)) {
+    headers.push(`${key}: ${value}\r\n`);
   }
+  headers.push(`content-length: ${response.body.length}\r\n`);
 
-  setStatusCode(statuCode: number): this {
-    this.statusCode = statuCode;
-    return this;
-  }
-
-  setStatusMessage(statusMessage: string): this {
-    this.statusMessage = statusMessage;
-    return this;
-  }
-
-  setContentType(contentType: string): this {
-    this.setHeader("content-type", contentType);
-    return this;
-  }
-
-  setContentEncoding(contentEncoding: string): this {
-    if (contentEncoding || contentEncoding.length > 0) {
-      this.setHeader("content-encoding", contentEncoding);
-    }
-    return this;
-  }
-
-  setHeaders(headers: Record<string, string | number>): this {
-    this.headers = headers;
-    return this;
-  }
-
-  setHeader(key: string, value: string | number): this {
-    this.headers[key] = value;
-    return this;
-  }
-
-  setBody(bodyText: string | Buffer | Uint8Array): this {
-    if (bodyText || bodyText.length > 0) {
-      this.body = Buffer.from(bodyText);
-      this.setHeader("content-length", this.body.length);
-    }
-
-    return this;
-  }
-
-  build(): HttpResponse {
-    return new HttpResponse(
-      this.version,
-      this.statusCode,
-      this.statusMessage,
-      this.headers,
-      this.body,
-    );
-  }
+  return Buffer.concat([
+    Buffer.from(statusLine + headers.join("") + "\r\n"),
+    response.body,
+  ]);
 }
 
-export const sendResponse = (
+export function sendResponse(
   socket: net.Socket,
   request: HttpRequest,
   content: string | Buffer,
   contentType: string = "text/plain",
-): void => {
-  try {
-    const contentEncoding = request.headers["accept-encoding"]?.split(", ");
-    const isCompressionSupported = contentEncoding?.some((encoding) =>
-      compressionSchemes.includes(encoding),
+): void {
+  const acceptEncoding = request.headers["accept-encoding"] ?? "";
+  const supportsGzip = acceptEncoding.split(",").some((encoding) => {
+    const [name, ...params] = encoding.trim().split(";");
+    const quality = params
+      .map((param) => param.trim())
+      .find((param) => param.startsWith("q="));
+
+    return (
+      name.trim().toLowerCase() === "gzip" &&
+      (!quality || Number(quality.slice(2)) > 0)
     );
-    const isConnectionClose =
-      request.headers["connection"] &&
-      request.headers["connection"] === "close";
+  });
 
-    const response = HttpResponse.Builder.setContentType(
-      request.headers["content-type"]
-        ? request.headers["content-type"]
-        : contentType,
-    )
-      .setContentEncoding(isCompressionSupported ? "gzip" : "")
-      .setBody(
-        isCompressionSupported ? Bun.gzipSync(Buffer.from(content)) : content,
-      )
-      .setHeader("connection", isConnectionClose ? "close" : "open")
-      .build();
+  const shouldClose = request.headers["connection"]?.toLowerCase() === "close";
 
-    socket.write(response.toBuffer());
-  } catch {
-    sendBadRequestResponse(socket);
+  const body = Buffer.from(content);
+
+  const response: HttpResponse = {
+    version: "HTTP/1.1",
+    status: HttpStatus.OK,
+    headers: {
+      "content-type": contentType,
+    },
+    body: supportsGzip ? Bun.gzipSync(body) : body,
+  };
+
+  if (supportsGzip) {
+    response.headers["content-encoding"] = "gzip";
   }
-};
 
-export const sendOKResponse = (socket: net.Socket) => {
-  socket.write(HttpResponse.Builder.build().toString());
-};
+  if (shouldClose) {
+    response.headers["connection"] = "close";
+    socket.end(toBuffer(response));
+  } else {
+    socket.write(toBuffer(response));
+  }
+}
 
-export const sendNotFoundResponse = (socket: net.Socket) => {
-  socket.write(
-    HttpResponse.Builder.setStatusCode(404)
-      .setStatusMessage("Not Found")
-      .build()
-      .toString(),
-  );
-};
+function sendStatusResponse(socket: net.Socket, status: HttpStatus): void {
+  const response: HttpResponse = {
+    version: "HTTP/1.1",
+    status,
+    headers: {},
+    body: Buffer.alloc(0),
+  };
 
-export const sendCreateResponse = (socket: net.Socket) => {
-  socket.write(
-    HttpResponse.Builder.setStatusCode(201)
-      .setStatusMessage("Created")
-      .build()
-      .toString(),
-  );
-};
+  socket.write(toBuffer(response));
+}
 
-export const sendBadRequestResponse = (socket: net.Socket) => {
-  socket.write(
-    HttpResponse.Builder.setStatusCode(400)
-      .setStatusMessage("Bad Request")
-      .build()
-      .toString(),
-  );
-};
+export function sendOKResponse(socket: net.Socket): void {
+  sendStatusResponse(socket, HttpStatus.OK);
+}
+
+export function sendNotFoundResponse(socket: net.Socket): void {
+  sendStatusResponse(socket, HttpStatus.NOT_FOUND);
+}
+
+export function sendCreatedResponse(socket: net.Socket): void {
+  sendStatusResponse(socket, HttpStatus.CREATED);
+}
+
+export function sendBadRequestResponse(socket: net.Socket): void {
+  sendStatusResponse(socket, HttpStatus.BAD_REQUEST);
+}

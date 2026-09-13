@@ -4,7 +4,7 @@ import {
   sendResponse,
   sendNotFoundResponse,
   sendOKResponse,
-  sendCreateResponse,
+  sendCreatedResponse,
 } from "./response";
 import { parseRequest } from "./request";
 
@@ -28,7 +28,7 @@ const server = net.createServer((socket) => {
 
       if (request.method === "POST") {
         writeFileSync(fullPath, request.body ?? "");
-        sendCreateResponse(socket);
+        sendCreatedResponse(socket);
         return;
       }
 
